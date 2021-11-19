@@ -1,0 +1,7 @@
+dn: olcDatabase={0}config,cn=config
+changetype: modify
+add: olcRootDN
+olcRootDN: cn={{ RootDN.db_admin }},cn=config
+-
+add: olcRootPW
+olcRootPW: {{ db_passwd.stdout }}

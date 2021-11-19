@@ -1,0 +1,19 @@
+dn: dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+o: {{ RootDN.dc }} {{ RootDN.dc_top }}
+dc: {{ RootDN.dc }}
+
+dn: cn={{ RootDN.db_admin }},dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+objectClass: organizationalRole
+cn: {{ RootDN.db_admin }}
+description: Directory Manager
+
+dn: ou=People,dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+objectClass: organizationalUnit
+ou: People
+
+dn: ou=Group,dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+objectClass: organizationalUnit
+ou: Group

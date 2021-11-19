@@ -1,0 +1,49 @@
+---
+- name: Install and configure OpenLDAP(OLC) clients
+  hosts: clients
+  become: yes
+
+
+  tasks:
+
+    - name: '[RHEL] install packages'
+      yum:
+        name: '{{ item }}'
+        state: latest
+        update_cache: yes
+      loop:
+        - openldap-clients
+        - nss-pam-ldapd
+        - openssl
+        - nscd
+      when: ansible_distribution_file_variety == 'RedHat'
+      tags:
+        - install
+  
+    - name: '[RHEL] make dir nslcd for nslcd.pid'
+      file:
+        path: /var/run/nslcd/
+        state: directory
+
+    - name: '[RHEL] copy nslcd config'
+      template:
+        src: "{{ item }}.j2"
+        dest: /etc/{{ item }}
+      loop:
+        - nslcd.conf
+      notify: restart-client
+
+    - name: '[RHEL] configure /etc/nsswitch.conf and /etc/pam.d/ with authconfig'
+      shell:
+        cmd: /usr/sbin/authconfig --updateall --enableldap --enableldapauth
+
+  handlers:
+
+    - name: restart-client
+      systemd:
+        name: '{{ item }}'
+        state: restarted
+        enabled: yes
+      loop:
+        - nscd 
+        - nslcd

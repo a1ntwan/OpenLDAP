@@ -1,0 +1,59 @@
+---
+- name: Install and configure OpenLDAP(OLC) clients
+  hosts: clients
+  become: yes
+
+
+  tasks:
+
+    - name: '[Debian] install packages'
+      apt:
+        name: '{{ item }}'
+        state: latest
+      loop:
+        - libnss-ldap
+        - libpam-ldap
+        - ldap-utils
+        - nscd
+        - nslcd
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: ansible_distribution_file_variety == 'Debian'
+      tags:
+        - install
+ 
+    - name: '[Debian] make dir nslcd for nslcd.pid'
+      file:
+        path: /var/run/nslcd/
+        state: directory
+
+    - name: '[Debian] copy nsswitch and nslcd config'
+      template:
+        src: "{{ item }}.j2"
+        dest: /etc/{{ item }}
+      loop:
+        - nslcd.conf
+        - nsswitch.conf
+
+    - name: '[Debian] configure /etc/pam.d/common-session'
+      copy:
+        src: pam-deb/{{ item }}
+        dest: /etc/pam.d/{{ item }}
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - common-session
+        - common-password
+      notify: restart-client
+
+  handlers:
+
+    - name: restart-client
+      systemd:
+        name: '{{ item }}'
+        state: restarted
+        enabled: yes
+      loop:
+        - nscd 
+        - nslcd

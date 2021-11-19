@@ -1,0 +1,218 @@
+---
+- name: Install and configure OpenLDAP(OLC) Server
+  hosts: server
+  become: yes
+
+  tasks:
+
+    - name: '[RHEL] install packages'
+      yum:
+        name: '{{ item }}'
+        state: latest
+        update_cache: yes
+      loop:
+        - openldap
+        - openldap-servers
+        - openldap-clients
+        - migrationtools
+        - python3-pip
+        - ca-certificates
+        - libselinux-python3
+      tags:
+        - install
+
+    - name: '[RHEL] install dependencies'
+      pip:
+        name: '{{ item }}'
+        state: latest
+      loop:
+        - pip
+        - wheel
+        - cryptography
+        - pyOpenSSL
+      vars:
+        ansible_python_interpreter: /bin/python3
+      tags:
+        - install
+
+    - name: '[RHEL] create CA key'
+      openssl_privatekey:
+        path: /etc/openldap/certs/ca.key
+        size: 4096
+        type: RSA
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[RHEL] create ca.csr'
+      openssl_csr:
+        path: /etc/openldap/certs/ca.csr
+        privatekey_path: /etc/openldap/certs/ca.key
+        country_name: "{{ csr_ca.country_name | default('US') }}"
+        organization_name: "{{ csr_ca.organization_name | default('Home') }}"
+        email_address: "{{ csr_ca.email_address | default('test@test.com') }}"
+        common_name: "{{ csr_ca.common_name | default('OpenLDAP-CA') }}"
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[RHEL] create ca.crt'
+      community.crypto.x509_certificate:
+        path: /etc/openldap/certs/ca.crt
+        privatekey_path: /etc/openldap/certs/ca.key
+        csr_path: /etc/openldap/certs/ca.csr
+        selfsigned_not_after: +{{ csr_ca.days | default('365') }}d
+        provider: selfsigned
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[RHEL] create server key'
+      openssl_privatekey:
+        path: /etc/openldap/certs/server.key
+        size: 4096
+        type: RSA
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[RHEL] create server.csr'
+      openssl_csr:
+        path: /etc/openldap/certs/server.csr
+        privatekey_path: /etc/openldap/certs/server.key
+        country_name: "{{ server_crt.country_name | default('US') }}"
+        organization_name: "{{ server_crt.organization_name | default('Home') }}"
+        email_address: "{{ server_crt.email_address | default('test@test.com') }}"
+        common_name: "{{ server_crt.common_name | default('OpenLDAP-Server') }}"
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[RHEL] create server.crt'
+      community.crypto.x509_certificate:
+        path: /etc/openldap/certs/server.crt
+        csr_path: /etc/openldap/certs/server.csr
+        ownca_path: /etc/openldap/certs/ca.crt
+        ownca_privatekey_path: /etc/openldap/certs/ca.key
+        provider: ownca
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[RHEL] get all certs'
+      find:
+        paths: /etc/openldap/certs/
+        patterns: 'server.*,ca.*'
+      register: pattern
+
+    - name: 'set permissions on certs'
+      file:
+        path: "{{ item.path }}"
+        owner: ldap
+        group: ldap
+        mode: '0600'
+      with_items:
+        - '{{ pattern.files }}'
+
+    - name: '[RHEL] create RootDN passwd hash'
+      shell:
+        cmd: "/usr/sbin/slappasswd -h {SSHA} -s {{ RootDN.db_admin_passwd }}"
+      register: db_passwd
+
+    - name: 'create basic ldifs'
+      template:
+        src: '{{ item.src }}'
+        dest: '{{ item.dst }}'
+        mode: '0600'
+      loop:
+        - { src: 'cn=config-rh.ldif.j2', dst: '/tmp/cn=config.ldif' }
+        - { src: 'config.ldif.j2', dst: '/tmp/config.ldif' }
+        - { src: 'monitor.ldif.j2', dst: '/tmp/monitor.ldif' }
+        - { src: 'hdb.ldif.j2', dst: '/tmp/hdb.ldif' }
+        - { src: 'logging.ldif.j2', dst: '/tmp/logging.ldif' }
+        - { src: 'base-rh.ldif.j2', dst: '/etc/openldap/slapd.d/base.ldif' }
+      
+    - name: '[RHEL] move DB_CONFIG'
+      copy:
+        src: /usr/share/openldap-servers/DB_CONFIG.example 
+        dest: /var/lib/ldap/DB_CONFIG
+        remote_src: yes
+
+    - name: '[RHEL] change ldap.conf'
+      lineinfile:
+        path: /etc/openldap/ldap.conf
+        insertbefore: '#BASE.*'
+        line: |
+          BASE   dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+          URI    ldap://{{ ansible_hostname }}.{{ ansible_domain }} 
+ 
+    - name: '[RHEL] start server'
+      systemd:
+        name: slapd
+        state: restarted
+        enabled: yes
+
+    - name: '[RHEL] add server settions, basic schemas and organizational units'
+      shell:
+        cmd: | 
+          if [ "$(/usr/bin/ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/openldap/schema/cosine.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/openldap/schema/nis.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/openldap/schema/inetorgperson.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/cn=config.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/config.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/monitor.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/hdb.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/logging.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapadd -x -D "cn={{ RootDN.db_admin }},dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}" -w {{ RootDN.db_admin_passwd }} -H ldapi:/// -f /etc/openldap/slapd.d/base.ldif)" == "80" ]; then exit 0; fi
+
+    - name: '[RHEL] configure rsyslog'
+      lineinfile:
+        create: yes
+        path: /etc/rsyslog.d/10-slapd.conf
+        line: |
+          $template slapdtmpl,"[%$DAY%-%$MONTH%-%$YEAR% %timegenerated:12:19:date-rfc3339%] %app-name% %syslogseverity-text% %msg%\n"
+          local4.*    /var/log/slapd.log;slapdtmpl
+
+    - name: '[RHEL] create log file'
+      file:
+        path: /var/log/slapd.log
+        state: touch
+      notify: restart-rsyslog
+
+    - name: '[RHEL] change migration tools settings'
+      lineinfile:
+        path: /usr/share/migrationtools/migrate_common.ph
+        regexp: '{{ item.src }}'
+        line: '{{ item.dst }}'
+      loop:
+        - { src: '^\$DEFAULT_MAIL_DOMAIN = ".*";', dst: '$DEFAULT_MAIL_DOMAIN = "{{ RootDN.dc }}.{{ RootDN.dc_top }}";' }
+        - { src: '^\$DEFAULT_BASE = ".*";', dst: '$DEFAULT_BASE = "dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}";' }
+        - { src: '^\$EXTENDED_SCHEMA = 0;', dst: '$EXTENDED_SCHEMA = 1;' }
+
+    - name: '[RHEL] copy passwd and group files'
+      copy:
+        src: '{{ item }}'
+        dest: /etc/openldap/slapd.d
+        owner: ldap
+        group: ldap
+        mode: '0600'
+      loop:
+        - lists/passwd
+        - lists/group
+
+    - name: '[RHEL] transform passwd and group to ldif'
+      shell:
+        cmd: "{{ item.script }} {{ item.src }} {{ item.dst }}"
+      loop:
+        - { src: "/etc/openldap/slapd.d/passwd", script: '/usr/share/migrationtools/migrate_passwd.pl'  ,dst: "/etc/openldap/slapd.d/passwd.ldif" } 
+        - { src: "/etc/openldap/slapd.d/group", script: '/usr/share/migrationtools/migrate_group.pl', dst: "/etc/openldap/slapd.d/group.ldif" }
+
+    - name: '[RHEL] import passwd and group'
+      shell:
+        cmd: |
+          if [ "$(/usr/bin/ldapadd -x -D "cn={{ RootDN.db_admin }},dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}" -w {{ RootDN.db_admin_passwd }} -H ldapi:/// -f {{ item }})" == "80" ]; then exit 0; fi
+      loop:
+        - /etc/openldap/slapd.d/passwd.ldif
+        - /etc/openldap/slapd.d/group.ldif
+
+  handlers:
+
+    - name: restart-rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
+        enabled: yes

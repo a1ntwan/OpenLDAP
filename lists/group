@@ -1,0 +1,4 @@
+root:x:0:
+nscd:x:28:
+ldap:x:55:
+vagrant:x:1000:

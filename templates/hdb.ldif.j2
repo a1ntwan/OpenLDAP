@@ -1,0 +1,21 @@
+dn: olcDatabase={2}hdb,cn=config
+changetype: modify
+replace: olcSuffix
+olcSuffix: dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+-
+replace: olcRootDN
+olcRootDN: cn={{ RootDN.db_admin }},dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+-
+add: olcRootPW
+olcRootPW: {{ db_passwd.stdout }}
+-
+add: olcAccess
+olcAccess: {0}to attrs=userPassword by self write read by anonymous auth by * none
+-
+add: olcAccess
+olcAccess: {1}to attrs=shadowLastChange by self write by * read
+-
+add: olcAccess
+olcAccess: {2}to * by * read
+
+

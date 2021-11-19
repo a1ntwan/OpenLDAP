@@ -1,0 +1,10 @@
+dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+replace: olcSuffix
+olcSuffix: dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+-
+replace: olcRootDN
+olcRootDN: cn={{ RootDN.db_admin }},dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+-
+replace: olcRootPW
+olcRootPW: {{ db_passwd.stdout }}

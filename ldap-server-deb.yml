@@ -1,0 +1,229 @@
+---
+- name: Install and configure OpenLDAP(OLC) Server
+  hosts: server
+  become: yes
+
+
+  tasks:
+
+    - name: '[Debian] install packages'
+      apt:
+        name: '{{ item }}'
+        state: latest
+      loop:
+        - slapd
+        - ldap-utils
+        - migrationtools
+        - python3-pip
+        - ca-certificates
+        - python3-selinux
+      when: ansible_distribution_file_variety == 'Debian'
+      tags:
+        - install
+
+    - name: '[Debian] install dependencies'
+      pip:
+        name: '{{ item }}'
+        state: latest
+      loop:
+        - pip
+        - wheel
+        - cryptography
+        - pyOpenSSL
+      vars:
+        ansible_python_interpreter: /bin/python3
+      tags:
+        - install
+
+    - name: '[Debian] create CA key'
+      openssl_privatekey:
+        path: /etc/ldap/sasl2/ca.key
+        size: 4096
+        type: RSA
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[Debian] create ca.csr'
+      openssl_csr:
+        path: /etc/ldap/sasl2/ca.csr
+        privatekey_path: /etc/ldap/sasl2/ca.key
+        country_name: "{{ csr_ca.country_name | default('US') }}"
+        organization_name: "{{ csr_ca.organization_name | default('Home') }}"
+        email_address: "{{ csr_ca.email_address | default('test@test.com') }}"
+        common_name: "{{ csr_ca.common_name | default('OpenLDAP-CA') }}"
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[Debian] create ca.crt'
+      community.crypto.x509_certificate:
+        path: /etc/ldap/sasl2/ca.crt
+        privatekey_path: /etc/ldap/sasl2/ca.key
+        csr_path: /etc/ldap/sasl2/ca.csr
+        selfsigned_not_after: +{{ csr_ca.days | default('365') }}d
+        provider: selfsigned
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[Debian] create server key'
+      openssl_privatekey:
+        path: /etc/ldap/sasl2/server.key
+        size: 4096
+        type: RSA
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[Debian] create server.csr'
+      openssl_csr:
+        path: /etc/ldap/sasl2/server.csr
+        privatekey_path: /etc/ldap/sasl2/server.key
+        country_name: "{{ server_crt.country_name | default('US') }}"
+        organization_name: "{{ server_crt.organization_name | default('Home') }}"
+        email_address: "{{ server_crt.email_address | default('test@test.com') }}"
+        common_name: "{{ server_crt.common_name | default('OpenLDAP-Server') }}"
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[Debian] create server.crt'
+      community.crypto.x509_certificate:
+        path: /etc/ldap/sasl2/server.crt
+        csr_path: /etc/ldap/sasl2/server.csr
+        ownca_path: /etc/ldap/sasl2/ca.crt
+        ownca_privatekey_path: /etc/ldap/sasl2/ca.key
+        provider: ownca
+      vars:
+        ansible_python_interpreter: /bin/python3
+
+    - name: '[Debian] set permissions on certs'
+      file:
+        path: /etc/ldap/sasl2
+        owner: openldap
+        group: openldap
+        mode: '0600'
+        recurse: yes
+
+    - name: '[Debian] set permissions on /etc/sasl2'
+      file:
+        path: /etc/ldap/sasl2
+        owner: openldap
+        group: openldap
+        mode: '0700'
+
+    - name: '[Debian] create RootDN passwd hash'
+      shell:
+        cmd: "/usr/sbin/slappasswd -h {SSHA} -s {{ RootDN.db_admin_passwd }}"
+      register: db_passwd
+
+    - name: '[Debian] create basic ldifs'
+      template:
+        src: '{{ item.src }}'
+        dest: '{{ item.dst }}'
+        mode: '0600'
+      loop:
+        - { src: 'cn=config-deb.ldif.j2', dst: '/tmp/cn=config.ldif' }
+        - { src: 'config.ldif.j2', dst: '/tmp/config.ldif' }
+        - { src: 'mdb.ldif.j2', dst: '/tmp/mdb.ldif' }
+        - { src: 'logging.ldif.j2', dst: '/tmp/logging.ldif' }
+        - { src: 'base-deb.ldif.j2', dst: '/etc/ldap/slapd.d/base.ldif' }
+
+    - name: '[Debian] move DB_CONFIG'
+      copy:
+        src: /usr/share/doc/slapd/examples/DB_CONFIG
+        dest: /var/lib/ldap/DB_CONFIG
+        owner: openldap
+        group: openldap
+        remote_src: yes
+
+    - name: '[Debian] change ldap.conf'
+      lineinfile:
+        path: /etc/ldap/ldap.conf
+        insertbefore: '#BASE.*'
+        line: |
+          BASE   dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}
+          URI    ldap://{{ ansible_hostname }}.{{ ansible_domain }}
+
+    - name: '[Debian] add server settings'
+      shell:
+        cmd: |
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/config.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/mdb.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/cn\=config.ldif)" == "80" ]; then exit 0; fi &&
+          if [ "$(/usr/bin/ldapmodify -Y EXTERNAL -H ldapi:/// -f /tmp/logging.ldif)" == "80" ]; then exit 0; fi
+
+    - name: '[Debian] configure rsyslog'
+      lineinfile:
+        create: yes
+        path: /etc/rsyslog.d/10-slapd.conf
+        line: |
+          $template slapdtmpl,"[%$DAY%-%$MONTH%-%$YEAR% %timegenerated:12:19:date-rfc3339%] %app-name% %syslogseverity-text% %msg%\n"
+          local4.*    /var/log/slapd.log;slapdtmpl
+
+    - name: '[Debian] create log file'
+      file:
+        path: /var/log/slapd.log
+        state: touch
+        owner: syslog
+        group: syslog
+      notify: restart-rsyslog
+
+    - name: '[Debian] change migration tools settings'
+      lineinfile:
+        path: /etc/migrationtools/migrate_common.ph
+        regexp: '{{ item.src }}'
+        line: '{{ item.dst }}'
+      loop:
+        - { src: '^\$DEFAULT_MAIL_DOMAIN = ".*";', dst: '$DEFAULT_MAIL_DOMAIN = "{{ RootDN.dc }}.{{ RootDN.dc_top }}";' }
+        - { src: '^\$DEFAULT_BASE = ".*";', dst: '$DEFAULT_BASE = "dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}";' }
+        - { src: '^\$EXTENDED_SCHEMA = 0;', dst: '$EXTENDED_SCHEMA = 1;' }
+
+    - name: '[Debian] copy passwd and group files'
+      copy:
+        src: '{{ item }}'
+        dest: /etc/ldap/slapd.d
+        owner: openldap
+        group: openldap
+        mode: '0600'
+      loop:
+        - lists/passwd
+        - lists/group
+
+    - name: '[Debian] replace migrate_passwd.pl'
+      copy:
+        src: migrate_passwd.pl
+        dest: /usr/share/migrationtools/
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: '[Debian] transform passwd and group to ldif'
+      shell:
+        cmd: "{{ item.script }} {{ item.src }} {{ item.dst }}"
+      loop:
+        - { src: "/etc/ldap/slapd.d/passwd", script: '/usr/share/migrationtools/migrate_passwd.pl'  ,dst: "/etc/ldap/slapd.d/passwd.ldif" }
+        - { src: "/etc/ldap/slapd.d/group", script: '/usr/share/migrationtools/migrate_group.pl', dst: "/etc/ldap/slapd.d/group.ldif" }
+
+    - name: '[Debian] start server'
+      systemd:
+        name: slapd
+        state: restarted
+        enabled: yes
+
+    - name: '[Debian] import basic organizational units'
+      shell:
+        cmd: |
+          if [ "$(/usr/bin/ldapadd -x -D "cn={{ RootDN.db_admin }},dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}" -w {{ RootDN.db_admin_passwd }} -H ldapi:/// -f /etc/ldap/slapd.d/base.ldif)" == "80" ]; then exit 0; fi
+
+    - name: '[Debian] import passwd + group'
+      shell:
+        cmd: |
+          if [ "$(/usr/bin/ldapadd -x -D "cn={{ RootDN.db_admin }},dc={{ RootDN.dc }},dc={{ RootDN.dc_top }}" -w {{ RootDN.db_admin_passwd }} -H ldapi:/// -f {{ item }})" == "80" ]; then exit 0; fi
+      loop:
+        - /etc/ldap/slapd.d/passwd.ldif
+        - /etc/ldap/slapd.d/group.ldif
+
+  handlers:
+
+    - name: restart-rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
+        enabled: yes

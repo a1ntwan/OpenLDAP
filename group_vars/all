@@ -1,0 +1,19 @@
+csr_ca:
+  country_name: RU
+  organization_name: Home
+  email_address: test@test.ru
+  common_name: OpenLDAP-CA
+  days: 365
+
+server_crt:
+  country_name: RU
+  organization_name: Home
+  email_address: test@test.ru
+  common_name: OpenLDAP-Server
+  days: 365
+
+RootDN:
+  dc: example
+  dc_top: net
+  db_admin: admin
+  db_admin_passwd: qwerty
